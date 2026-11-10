@@ -1,0 +1,5 @@
+* text=auto
+# cmd.exe misparses batch files with LF line endings
+*.bat text eol=crlf
+*.npz binary
+*.ply binary

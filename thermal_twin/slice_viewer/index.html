@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>slice viewer</title>
+<style>
+  :root { --ink:#0b0b0b; --ink2:#52514e; --line:#d6d5d0; --accent:#2a78d6; --btn:#ffffff; --field:#ffffff; }
+  html, body { margin:0; padding:0; background:transparent; color:var(--ink);
+               font-family:"Source Sans Pro","Source Sans 3",-apple-system,"Segoe UI","Malgun Gothic",sans-serif; }
+  .bar { display:flex; flex-wrap:wrap; align-items:center; gap:10px 22px; padding:2px 2px 8px; font-size:14px; }
+  .seg { display:inline-flex; border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+  .seg button { border:0; background:var(--btn); padding:6px 12px; font:inherit; color:var(--ink2); cursor:pointer; }
+  .seg button + button { border-left:1px solid var(--line); }
+  .seg button.on { background:var(--accent); color:#fff; }
+  .pos { flex:1 1 300px; display:flex; align-items:center; gap:10px; min-width:240px; }
+  .pos input[type=range] { flex:1; accent-color:var(--accent); height:22px; cursor:pointer; }
+  .val { font-variant-numeric:tabular-nums; min-width:84px; font-weight:600; }
+  .cr input { width:56px; font:inherit; padding:3px 4px; border:1px solid var(--line); border-radius:6px; background:var(--field); color:var(--ink); }
+  label { color:var(--ink2); }
+  .plots { display:flex; gap:10px; }
+  #p2d { flex:1.15 1 0; min-width:0; }
+  #p3d { flex:1 1 0; min-width:0; }
+  .hidden { display:none !important; }
+</style>
+</head>
+<body>
+<div class="bar">
+  <div class="seg" id="axis">
+    <button data-a="2" class="on">z · 수평 단면</button><button data-a="1">y · 남북으로 자르기</button><button data-a="0">x · 동서로 자르기</button>
+  </div>
+  <div class="pos">
+    <label id="poslabel" for="pos">z 위치</label>
+    <input type="range" id="pos" min="0" max="1" step="1" value="0">
+    <span class="val" id="posval"></span>
+  </div>
+  <div class="cr"><label>색상 범위</label> <input type="number" id="cmin" step="0.5"> – <input type="number" id="cmax" step="0.5"> °C</div>
+  <label><input type="checkbox" id="show3d" checked> 3D 위치 함께 보기</label>
+</div>
+<div class="plots"><div id="p2d"></div><div id="p3d"></div></div>
+
+<script src="plotly.min.js"></script>
+<script>
+/* Section viewer that runs entirely in the browser:
+   the slider updates the 2D heatmap on every 'input' event (Plotly.react, no re-creation -> no flicker)
+   and moves the slice plane in the 3D view in place (Plotly.restyle, throttled while dragging). */
+let INK = "#0b0b0b", INK2 = "#52514e";     // switched by applyTheme() when Streamlit runs a dark theme
+
+function applyTheme(theme) {
+  const dark = theme && theme.base === "dark";
+  INK = dark ? (theme.textColor || "#fafafa") : "#0b0b0b";
+  INK2 = dark ? "#c3c2b7" : "#52514e";
+  const r = document.documentElement.style;
+  r.setProperty("--ink", INK);
+  r.setProperty("--ink2", INK2);
+  r.setProperty("--line", dark ? "#4a4a46" : "#d6d5d0");
+  r.setProperty("--btn", dark ? "#262730" : "#ffffff");
+  r.setProperty("--field", dark ? "#262730" : "#ffffff");
+  return dark;
+}
+const AXN = ["x", "y", "z"];
+const AXL = ["x (서→동) [m]", "y (남→북) [m]", "z (높이) [m]"];
+const PLANE = {0: [1, 2], 1: [0, 2], 2: [0, 1]};
+const DEFAULT_POS = {2: 1.6, 1: 9.0, 0: 12.0};
+const CONFIG = {displaylogo: false, responsive: true};
+const div2d = document.getElementById("p2d"), div3d = document.getElementById("p3d");
+const posEl = document.getElementById("pos"), posVal = document.getElementById("posval"), posLab = document.getElementById("poslabel");
+const cminEl = document.getElementById("cmin"), cmaxEl = document.getElementById("cmax"), show3dEl = document.getElementById("show3d");
+
+let S = null;            // viewer state
+let raf = 0, last3d = 0, timer3d = 0;
+
+function send(type, data) {
+  window.parent.postMessage(Object.assign({isStreamlitMessage: true, type: type}, data || {}), "*");
+}
+function setHeight() { send("streamlit:setFrameHeight", {height: document.body.scrollHeight + 4}); }
+
+function b64ToF32(b64) {
+  const bin = atob(b64), n = bin.length, u8 = new Uint8Array(n);
+  for (let i = 0; i < n; i++) u8[i] = bin.charCodeAt(i);
+  return new Float32Array(u8.buffer);
+}
+function centers(o, h, n) { const a = new Array(n); for (let i = 0; i < n; i++) a[i] = o + (i + 0.5) * h; return a; }
+function coordOf(axis, i) { return S.spec.origin[axis] + (i + 0.5) * S.spec.h; }
+
+function sliceArr(axis, idx) {
+  const [nx, ny, nz] = S.shape, T = S.T;
+  let rows, cols, get;
+  if (axis === 2)      { rows = ny; cols = nx; get = (r, c) => T[(c * ny + r) * nz + idx]; }
+  else if (axis === 1) { rows = nz; cols = nx; get = (r, c) => T[(c * ny + idx) * nz + r]; }
+  else                 { rows = nz; cols = ny; get = (r, c) => T[(idx * ny + c) * nz + r]; }
+  const out = new Array(rows);
+  for (let r = 0; r < rows; r++) {
+    const row = new Array(cols);
+    for (let c = 0; c < cols; c++) { const v = get(r, c); row[c] = Number.isFinite(v) ? v : null; }
+    out[r] = row;
+  }
+  return out;
+}
+
+function overlays(axis, coord) {
+  const [u, v] = PLANE[axis], sp = S.spec, shapes = [], ann = [];
+  const rect = (lo, hi, color, width) => ({type: "rect", x0: lo[u], x1: hi[u], y0: lo[v], y1: hi[v], line: {color: color, width: width}, layer: "above"});
+  sp.racks.forEach(b => { if (b.lo[axis] - 1e-6 <= coord && coord <= b.hi[axis] + 1e-6) shapes.push(rect(b.lo, b.hi, "#1baf7a", 2)); });
+  sp.heat.forEach(b => { if (b.lo[axis] - 1e-6 <= coord && coord <= b.hi[axis] + 1e-6) shapes.push(rect(b.lo, b.hi, "#eda100", 1.5)); });
+  sp.devices.forEach(d => {
+    if (d.lo[axis] - sp.h / 2 <= coord && coord <= d.hi[axis] + sp.h / 2) {
+      shapes.push(rect(d.lo, d.hi, INK, 1.5));
+      ann.push({x: (d.lo[u] + d.hi[u]) / 2, y: d.hi[v], text: d.id + " " + d.T.toFixed(0) + "°C", showarrow: false, yshift: 10,
+                font: {size: 11, color: "#0b0b0b"}, bgcolor: "rgba(255,255,255,0.85)", bordercolor: d.color, borderwidth: 1});
+    }
+  });
+  return [shapes, ann];
+}
+
+function render2d() {
+  const a = S.axis, i = S.idx[a], [u, v] = PLANE[a], sp = S.spec;
+  const cu = centers(sp.origin[u], sp.h, S.shape[u]), cv = centers(sp.origin[v], sp.h, S.shape[v]);
+  const coord = coordOf(a, i), mid = 0.5 * (sp.low + sp.high);
+  const Z = sliceArr(a, i);
+  const Zc = Z.map(r => r.map(x => (x === null ? mid : x)));
+  const [shapes, ann] = overlays(a, coord);
+  const data = [
+    {type: "heatmap", x: cu, y: cv, z: Z, colorscale: sp.colorscale, zmin: S.cmin, zmax: S.cmax,
+     colorbar: {title: {text: "°C", font: {color: INK}}, tickfont: {color: INK2}, thickness: 14},
+     hovertemplate: AXN[u] + "=%{x:.2f} m<br>" + AXN[v] + "=%{y:.2f} m<br>T=%{z:.1f} °C<extra></extra>"},
+    {type: "contour", x: cu, y: cv, z: Zc, showscale: false, hoverinfo: "skip", name: "목표 범위 경계",
+     contours: {start: sp.low, end: sp.high, size: Math.max(sp.high - sp.low, 1e-3), coloring: "none",
+                showlabels: true, labelfont: {color: INK, size: 11}},
+     line: {color: INK, width: 1.4, dash: "dot"}},
+  ];
+  const layout = {
+    height: S.plotH, margin: {l: 10, r: 10, t: 40, b: 10}, shapes: shapes, annotations: ann,
+    title: {text: AXN[a] + " = " + coord.toFixed(2) + " m 단면", font: {size: 14, color: INK}},
+    plot_bgcolor: S.dark ? "#262622" : "#f7f7f5", paper_bgcolor: "rgba(0,0,0,0)",
+    font: {family: getComputedStyle(document.body).fontFamily, color: INK},
+    xaxis: {title: {text: AXL[u]}, color: INK2, showgrid: false, zeroline: false, automargin: true, constrain: "domain",
+            range: [cu[0] - sp.h / 2, cu[cu.length - 1] + sp.h / 2]},
+    yaxis: {title: {text: AXL[v]}, color: INK2, showgrid: false, zeroline: false, automargin: true, constrain: "domain",
+            range: [cv[0] - sp.h / 2, cv[cv.length - 1] + sp.h / 2], scaleanchor: "x", scaleratio: 1},
+    uirevision: "axis" + a,
+  };
+  // slider moves: in-place update (no flicker).  axis switch: fresh plot, because react keeps the old
+  // axis ranges when the aspect ratio is locked.
+  if (S.axis2d !== a) { S.axis2d = a; Plotly.newPlot(div2d, data, layout, CONFIG); }
+  else Plotly.react(div2d, data, layout, CONFIG);
+}
+
+function render3d() {
+  if (!S.show3d || S.surfIdx < 0) return;
+  last3d = performance.now();
+  const a = S.axis, i = S.idx[a], [u, v] = PLANE[a], sp = S.spec;
+  const cu = centers(sp.origin[u], sp.h, S.shape[u]), cv = centers(sp.origin[v], sp.h, S.shape[v]);
+  const coord = coordOf(a, i);
+  const C = sliceArr(a, i), X = [], Y = [], W = [];
+  for (let r = 0; r < cv.length; r++) {
+    const rx = new Array(cu.length), ry = new Array(cu.length), rw = new Array(cu.length);
+    for (let c = 0; c < cu.length; c++) {
+      const p = [0, 0, 0]; p[u] = cu[c]; p[v] = cv[r]; p[a] = coord;
+      rx[c] = p[0]; ry[c] = p[1]; rw[c] = p[2];
+    }
+    X.push(rx); Y.push(ry); W.push(rw);
+  }
+  Plotly.restyle(div3d, {x: [X], y: [Y], z: [W], surfacecolor: [C], cmin: [S.cmin], cmax: [S.cmax]}, [S.surfIdx]);
+  if (S.labelIdx >= 0 && sp.devices.length) {
+    const zs = sp.devices.map(d => (a === 2 ? Math.max(d.top + 0.45, coord + 0.6) : d.top + 0.45));
+    Plotly.restyle(div3d, {z: [zs]}, [S.labelIdx]);
+  }
+}
+
+// 2D follows the slider on every animation frame (~20 ms per redraw).
+// 3D (WebGL scene with meshes, ~0.1-0.2 s per update) is refreshed as soon as the slider pauses or is
+// released, so it never blocks the 2D view while dragging.
+function schedule(final) {
+  if (!raf) raf = requestAnimationFrame(() => { raf = 0; render2d(); });
+  clearTimeout(timer3d);
+  if (final) timer3d = setTimeout(render3d, 0);
+  else timer3d = setTimeout(render3d, 180);
+}
+
+function syncControls() {
+  const a = S.axis, n = S.shape[a];
+  document.querySelectorAll("#axis button").forEach(b => b.classList.toggle("on", +b.dataset.a === a));
+  posEl.max = n - 1;
+  posEl.value = S.idx[a];
+  posLab.textContent = AXN[a] + " 위치";
+  posVal.textContent = AXN[a] + " = " + coordOf(a, S.idx[a]).toFixed(2) + " m";
+  cminEl.value = S.cmin; cmaxEl.value = S.cmax;
+  show3dEl.checked = S.show3d;
+}
+
+function nearestIdx(axis, value) {
+  const n = S.shape[axis];
+  return Math.max(0, Math.min(n - 1, Math.round((value - S.spec.origin[axis]) / S.spec.h - 0.5)));
+}
+
+function style3dForTheme() {
+  if (!S.dark) return;
+  const ax = {color: INK2, gridcolor: "#3a3a36", zerolinecolor: "#3a3a36"};
+  Plotly.relayout(div3d, {"scene.xaxis": Object.assign({}, div3d.layout.scene.xaxis, ax),
+                          "scene.yaxis": Object.assign({}, div3d.layout.scene.yaxis, ax),
+                          "scene.zaxis": Object.assign({}, div3d.layout.scene.zaxis, ax)});
+  if (S.labelIdx >= 0) Plotly.restyle(div3d, {"textfont.color": INK}, [S.labelIdx]);
+}
+
+function onRender(spec, theme) {
+  const dark = applyTheme(theme);
+  const sameData = S && S.spec.data_id === spec.data_id;
+  if (sameData) {
+    if (S.dark !== dark) { S.dark = dark; render2d(); style3dForTheme(); }
+    return;
+  }
+  const prev = S;
+  const shape = spec.shape;
+  const keep = prev && prev.shape.join() === shape.join();
+  S = {
+    spec: spec, shape: shape, T: b64ToF32(spec.T),
+    axis: keep ? prev.axis : 2,
+    idx: keep ? prev.idx : {0: 0, 1: 0, 2: 0},
+    cmin: keep ? prev.cmin : spec.crange[0], cmax: keep ? prev.cmax : spec.crange[1],
+    show3d: prev ? prev.show3d : true,
+    plotH: spec.height - 56, surfIdx: -1, labelIdx: -1, axis2d: keep ? prev.axis2d : -1, dark: dark,
+  };
+  if (!keep) for (const a of [0, 1, 2]) S.idx[a] = nearestIdx(a, DEFAULT_POS[a]);
+  const fig = spec.fig3d;
+  fig.layout.height = S.plotH;
+  delete fig.layout.width;
+  fig.layout.autosize = true;
+  fig.data.forEach((t, k) => {
+    if (t.type === "surface") S.surfIdx = k;
+    if (t.type === "scatter3d" && t.mode === "text") S.labelIdx = k;
+  });
+  syncControls();
+  div3d.classList.toggle("hidden", !S.show3d);
+  (prev ? Plotly.react : Plotly.newPlot)(div3d, fig.data, fig.layout, CONFIG).then(() => { style3dForTheme(); render3d(); });
+  render2d();
+  setTimeout(setHeight, 0);
+}
+
+// ---------------------------------------------------------------- controls
+posEl.addEventListener("input", () => {
+  if (!S) return;
+  S.idx[S.axis] = +posEl.value;
+  posVal.textContent = AXN[S.axis] + " = " + coordOf(S.axis, S.idx[S.axis]).toFixed(2) + " m";
+  schedule(false);
+});
+posEl.addEventListener("change", () => { if (S) schedule(true); });
+document.querySelectorAll("#axis button").forEach(b => b.addEventListener("click", () => {
+  if (!S) return;
+  S.axis = +b.dataset.a;
+  syncControls();
+  schedule(true);
+}));
+function onRange() {
+  if (!S) return;
+  const lo = parseFloat(cminEl.value), hi = parseFloat(cmaxEl.value);
+  if (!(hi > lo)) return;
+  S.cmin = lo; S.cmax = hi;
+  render2d();
+  if (S.show3d && S.surfIdx >= 0) Plotly.restyle(div3d, {cmin: [lo], cmax: [hi]}, [S.surfIdx]);
+}
+cminEl.addEventListener("change", onRange);
+cmaxEl.addEventListener("change", onRange);
+show3dEl.addEventListener("change", () => {
+  if (!S) return;
+  S.show3d = show3dEl.checked;
+  div3d.classList.toggle("hidden", !S.show3d);
+  Plotly.Plots.resize(div2d);
+  if (S.show3d) { Plotly.Plots.resize(div3d); render3d(); }
+});
+
+window.addEventListener("message", ev => {
+  if (ev.data && ev.data.type === "streamlit:render") onRender(ev.data.args.spec, ev.data.theme);
+});
+new ResizeObserver(setHeight).observe(document.body);
+send("streamlit:componentReady", {apiVersion: 1});
+</script>
+</body>
+</html>

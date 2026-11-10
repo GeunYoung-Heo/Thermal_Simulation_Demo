@@ -1,0 +1,141 @@
+# =====================================================================
+#  의약품 물류창고 (GDP: Controlled Room Temperature 15–25 °C)
+#  좌표계: x = 서(0) -> 동,  y = 남(0) -> 북,  z = 바닥(0) -> 천장   [m]
+#  이 파일은 "실제 현장"을 정의한다. 스캐너/SAM3 시뮬레이터만 이 정답을 보고,
+#  이후 단계(메쉬, 열 모델)는 오직 재구성 결과만 사용한다.
+# =====================================================================
+name: "의약품 물류창고"
+seed: 7
+
+room:
+  size: [24.0, 18.0, 7.0]       # 실내 치수 [m]
+  wall_thickness: 0.3
+
+# ---------------------------------------------------------------- 출입문
+doors:
+  - {name: dock_door_1, wall: wall_south, center: 6.0,  width: 3.0, height: 3.6, kind: dock}
+  - {name: dock_door_2, wall: wall_south, center: 11.5, width: 3.0, height: 3.6, kind: dock}
+  - {name: personnel_door, wall: wall_west, center: 2.0, width: 1.0, height: 2.1, kind: personnel}
+
+# ---------------------------------------------------------------- 보관 랙 (관리대상 구역)
+# x방향으로 긴 랙 열. sides=2 이면 등을 맞댄 더블 랙.
+racks:
+  - {name: rack_row_1, x0: 5.0, bays: 5, bay_width: 2.75, y0: 5.4,  sides: 2}
+  - {name: rack_row_2, x0: 5.0, bays: 5, bay_width: 2.75, y0: 10.8, sides: 2}
+  - {name: rack_row_3, x0: 5.0, bays: 5, bay_width: 2.75, y0: 16.6, sides: 1}
+rack_levels: [0.0, 1.6, 3.1, 4.6]   # 단 높이(빔 상단) [m]
+rack_upright_height: 5.6
+rack_empty_ratio: 0.12              # 빈 팔레트 자리 비율
+
+# ---------------------------------------------------------------- 열 관련 장치 (ID 부여 대상)
+# 현재 설치 상태: 라디에이터 4대가 모두 도크(남측) 쪽에 몰려 있음 -> 북측 랙이 춥다.
+devices:
+  - {class: radiator, wall: wall_south, center: 2.5,  z0: 0.15}
+  - {class: radiator, wall: wall_south, center: 8.75, z0: 0.15}
+  - {class: radiator, wall: wall_south, center: 15.0, z0: 0.15}
+  - {class: radiator, wall: wall_south, center: 20.0, z0: 0.15}
+  - {class: air_conditioner, wall: wall_west, center: 12.0, z0: 4.4}
+  - {class: air_conditioner, wall: wall_east, center: 12.0, z0: 4.4}
+
+# ---------------------------------------------------------------- 발열 설비 (ID 없음 -> 경계조건)
+equipment:
+  - {name: charger_1, class: battery_charger,    center: [23.55, 6.0, 0.7], size: [0.5, 1.2, 1.4]}
+  - {name: charger_2, class: battery_charger,    center: [23.55, 16.0, 0.7], size: [0.5, 1.2, 1.4]}
+  - {name: cabinet_1, class: electrical_cabinet, center: [0.3, 9.0, 1.0],   size: [0.5, 1.4, 2.0]}
+
+# ---------------------------------------------------------------- 잡동사니 (탐지 대상 아님)
+clutter:
+  forklifts: [[17.0, 2.4]]
+  loose_pallets: [[2.5, 3.0], [3.9, 3.0], [8.6, 2.6], [14.2, 2.0], [20.5, 3.2]]
+  ceiling_lights: {rows: [4.5, 9.3, 14.9], xs: [3.0, 9.0, 15.0, 21.0]}
+  extinguishers: [[wall_west, 6.0], [wall_east, 14.0], [wall_north, 2.0]]
+floor_lines:                         # 바닥 안전선 (노란색)
+  - {axis: x, at: 4.5, from: 0.3, to: 23.7}
+  - {axis: y, at: 4.4, from: 4.5, to: 17.7}
+  - {axis: y, at: 19.4, from: 4.5, to: 17.7}
+
+# ---------------------------------------------------------------- 스캔 (가상 RGB-D 파노라마 스캐너)
+scanner:
+  stations:                          # 스캔 위치 [x, y]  (높이 = station_height)
+    - [2.5, 2.2]
+    - [8.75, 2.2]
+    - [15.0, 2.2]
+    - [21.5, 2.2]
+    - [2.8, 9.3]
+    - [9.0, 9.3]
+    - [15.0, 9.3]
+    - [21.5, 9.3]
+    - [2.8, 14.9]
+    - [9.0, 14.9]
+    - [15.0, 14.9]
+    - [21.5, 14.9]
+  station_height: 1.6
+  width: 1024                        # 파노라마 해상도 (가로 360°)
+  height: 448                        # 세로 (elevation_range)
+  elevation_range: [-78.0, 78.0]
+  range_noise: [0.004, 0.0015]       # sigma = a + b * range  [m]
+  dropout: 0.03
+  grazing_cutoff: 0.10               # |cos(입사각)| 이 값보다 작으면 측정 실패 확률 높음
+  max_range: 30.0
+  pose_noise: {translation: 0.012, rotation_deg: 0.08}   # 스테이션 간 정합 오차
+  flying_pixel_prob: 0.25
+  downsample: 0.03                   # 통합 포인트클라우드 voxel 다운샘플 [m]
+
+# ---------------------------------------------------------------- SAM3 (시뮬레이션)
+sam3:
+  score_threshold: 0.5
+  min_pixels: 40
+  miss_prob_small: 0.35              # 작은 마스크(<150px) 탐지 실패 확률
+  miss_prob: 0.04
+  boundary_flip: 0.3                 # 마스크 경계 픽셀 뒤집힘 비율
+  vote_ratio: 0.5                    # 포인트 라벨 결정: 해당 클래스 득표/관측 횟수
+  cluster_voxel: 0.10                # 3D 인스턴스 분리용 voxel [m]
+  min_instance_points: 500
+  min_confidence: 0.6                # 평균 득표율이 이보다 낮은 클러스터는 오탐으로 제거
+
+# ---------------------------------------------------------------- 메쉬 재구성 (TSDF)
+reconstruction:
+  voxel: 0.05
+  truncation: 0.15
+  display_faces: 200000              # 화면 표시용 삼각형 수 (전체)
+
+# ---------------------------------------------------------------- 열 모델 기본값
+thermal:
+  grid_h: 0.25                       # voxel 크기 [m]
+  materials:                          # 유효 열전도도 [W/m·K]
+    air: 20.0                        # 공기: 대류 혼합 효과를 등가 전도로 반영한 값 (실제 0.026)
+    goods: 4.0                       # 적재 화물(랙 내부)
+  target: {low: 15.0, high: 25.0, margin: 0.5}
+  device_types:
+    radiator:        {T_min: 20.0, T_max: 75.0, T_default: 55.0, size: [1.6, 0.12, 0.6], mount_z: 0.15, wall_offset: 0.06}
+    air_conditioner: {T_min: 2.0,  T_max: 20.0, T_default: 8.0,  size: [1.3, 0.47, 0.55], mount_z: 4.4, wall_offset: 0.0}
+  # T_min/T_max = 장치 표면(코일)온도 허용 범위. 최적화는 이 범위 안에서 운전온도를 고른다.
+  heat_source_defaults:
+    battery_charger:    {type: fixed, T: 35.0}
+    electrical_cabinet: {type: fixed, T: 40.0}
+  # 시나리오 프리셋: 외기/지중 온도 + 외피 열관류율(U) [W/m²K]
+  presets:
+    winter:
+      label: "겨울 (외기 -5 °C) - 라디에이터 난방"
+      active_device_classes: [radiator]
+      boundaries:
+        wall_south: {type: convective, T: -5.0, U: 0.35}
+        wall_north: {type: convective, T: -5.0, U: 0.35}
+        wall_west:  {type: convective, T: -5.0, U: 0.35}
+        wall_east:  {type: convective, T: -5.0, U: 0.35}
+        ceiling:    {type: convective, T: -5.0, U: 0.25}
+        floor:      {type: convective, T: 10.0, U: 0.30}
+        door_dock:      {type: convective, T: -5.0, U: 2.5}
+        door_personnel: {type: convective, T: -5.0, U: 1.8}
+    summer:
+      label: "여름 (외기 30 °C, 지붕 일사) - 냉방기 운전"
+      active_device_classes: [air_conditioner]
+      boundaries:                    # 일사를 받는 면은 상당외기온도(sol-air)로 더 높게
+        wall_south: {type: convective, T: 32.0, U: 0.35}
+        wall_north: {type: convective, T: 30.0, U: 0.35}
+        wall_west:  {type: convective, T: 30.0, U: 0.35}
+        wall_east:  {type: convective, T: 30.0, U: 0.35}
+        ceiling:    {type: convective, T: 38.0, U: 0.25}
+        floor:      {type: convective, T: 18.0, U: 0.30}
+        door_dock:      {type: convective, T: 30.0, U: 2.5}
+        door_personnel: {type: convective, T: 30.0, U: 1.8}

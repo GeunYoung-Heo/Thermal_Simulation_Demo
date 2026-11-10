@@ -1,0 +1,10 @@
+[server]
+# no "enter your email" prompt in the console on first launch
+showEmailPrompt = false
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+# all charts are styled for a light background; without this the app follows the OS dark mode
+base = "light"

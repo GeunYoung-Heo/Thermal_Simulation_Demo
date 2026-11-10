@@ -1,0 +1,11 @@
+numpy>=2.0
+scipy>=1.13
+scikit-image>=0.24
+pyamg>=5.2
+fast-simplification>=0.1.9
+pyyaml>=6.0
+pandas>=2.2
+plotly>=6.0
+streamlit>=1.50
+pillow>=10.1
+matplotlib>=3.8
